@@ -1,0 +1,23 @@
+providers:
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+
+models:
+  general-primary:
+    provider: deepseek
+    model: deepseek-chat
+  general-backup:
+    provider: deepseek
+    model: deepseek-flash
+  general:
+    strategy: priority
+    candidates:
+      - provider: deepseek
+        model: deepseek-chat
+      - provider: deepseek
+        model: deepseek-flash
+
+retry:
+  max_attempts_per_model: 2
+  wait_seconds: 0.1
