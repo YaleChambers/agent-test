@@ -3,3 +3,4 @@ gateway.yaml
 __pycache__/
 *.pyc
 .venv/
+traces.db
