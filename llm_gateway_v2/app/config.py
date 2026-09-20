@@ -16,6 +16,10 @@ from openai import (
 class ModelConfig:
     model: str
     base_url: str
+    # 单价，单位：美元 / token（USD per token）。
+    # 例如 0.00000014 表示 $0.14 / 1M tokens。
+    input_price: float = 0.0
+    output_price: float = 0.0
 
 
 CandidateModel: TypeAlias = tuple[str, ModelConfig]
@@ -65,6 +69,8 @@ for name, model_config in models.items():
             candidate_config = ModelConfig(
                 model=candidate["model"],
                 base_url=providers[candidate["provider"]]["base_url"],
+                input_price=float(candidate.get("input_price", 0.0)),
+                output_price=float(candidate.get("output_price", 0.0)),
             )
             candidate_name = f"{name}__candidate_{index}"
             candidates.append((candidate_name, candidate_config))
@@ -75,6 +81,8 @@ for name, model_config in models.items():
     MODEL_CONFIGS[name] = ModelConfig(
         model=model_config["model"],
         base_url=providers[model_config["provider"]]["base_url"],
+        input_price=float(model_config.get("input_price", 0.0)),
+        output_price=float(model_config.get("output_price", 0.0)),
     )
 
 

@@ -4,3 +4,5 @@ pydantic
 openai
 httpx
 jsonschema
+pytest
+pytest-asyncio

@@ -1,18 +1,17 @@
 import os
 import json
+import time
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
 from ..config import ModelConfig
-from ..schemas import LLMRequest, LLMResponse
+from ..schemas import LLMRequest, LLMResponse, Usage
 
 
 @dataclass(frozen=True)
 class UpstreamResult:
     response: LLMResponse
-    input_tokens: int
-    output_tokens: int
 
 
 async def call_upstream(
@@ -47,15 +46,57 @@ async def call_upstream(
                 },
             )
             request_kwargs["response_format"] = {"type": "json_object"}
+
+        # 非流式 ttft：从发出上游请求到收到完整响应的时间，作为近似 ttft
+        start = time.perf_counter()
         completion = await client.chat.completions.create(
             **request_kwargs,
         )
+        ttft_ms = (time.perf_counter() - start) * 1000
+
         content = completion.choices[0].message.content or ""
-        usage = completion.usage
+
+        # 从上游响应提取真实 token 用量，不写死 0
+        usage_obj = completion.usage
+        input_tokens = getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0
+        output_tokens = (
+            getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0
+        )
+        total_tokens = (
+            getattr(usage_obj, "total_tokens", input_tokens + output_tokens)
+            if usage_obj
+            else input_tokens + output_tokens
+        )
+
+        cached_tokens: int | None = None
+        reasoning_tokens: int | None = None
+        if usage_obj is not None:
+            prompt_details = getattr(usage_obj, "prompt_tokens_details", None)
+            if prompt_details is not None:
+                cached_tokens = getattr(prompt_details, "cached_tokens", None)
+            completion_details = getattr(
+                usage_obj, "completion_tokens_details", None
+            )
+            if completion_details is not None:
+                reasoning_tokens = getattr(
+                    completion_details, "reasoning_tokens", None
+                )
+
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cached_tokens=cached_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
+
         return UpstreamResult(
-            response=LLMResponse(content=content, model=model_config.model),
-            input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+            response=LLMResponse(
+                content=content,
+                model=model_config.model,
+                usage=usage,
+                ttft_ms=ttft_ms,
+            ),
         )
     finally:
         await client.close()

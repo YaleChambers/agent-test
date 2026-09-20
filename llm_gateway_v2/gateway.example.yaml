@@ -4,20 +4,47 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
 
 models:
+  # 单价单位：美元 / token（USD per token）。
+  # 0.00000014 表示 $0.14 / 1M tokens。
   general-primary:
     provider: deepseek
     model: deepseek-chat
+    input_price: 0.00000014
+    output_price: 0.00000028
+    capabilities:
+      streaming: true
+      structured_output: true
+      tool_calling: true
   general-backup:
     provider: deepseek
     model: deepseek-flash
+    input_price: 0.00000007
+    output_price: 0.00000014
+    capabilities:
+      streaming: true
+      structured_output: false
+      tool_calling: false
   general:
     strategy: priority
     candidates:
       - provider: deepseek
         model: deepseek-chat
+        input_price: 0.00000014
+        output_price: 0.00000028
       - provider: deepseek
         model: deepseek-flash
+        input_price: 0.00000007
+        output_price: 0.00000014
 
 retry:
   max_attempts_per_model: 2
   wait_seconds: 0.1
+
+routing:
+  policy: priority
+  fallback_order:
+    - general-primary
+    - general-backup
+  weights:
+    general-primary: 80
+    general-backup: 20

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone
 from typing import Literal
@@ -22,14 +23,40 @@ from ..core.errors import (
     UPSTREAM_ERROR,
 )
 from ..config import MAX_RETRIES, RETRY_DELAY_SECONDS
-from ..schemas import CallTrace, LLMRequest, LLMResponse, Message
-from .router import get_candidate_models, is_retryable
+from ..schemas import (
+    CallTrace,
+    LLMRequest,
+    LLMResponse,
+    Message,
+    RejectedCandidate,
+    RouteDecision,
+    Usage,
+)
+from .router import get_candidate_models, get_route_decision, is_retryable
 from .prompts import render_prompt
 from .upstream import UpstreamResult, call_upstream
 from .usage import record_trace
 
 
 logger = logging.getLogger(__name__)
+_sleep = asyncio.sleep
+MAX_DELAY_SECONDS = 30.0
+
+
+def set_sleep_fn(fn) -> None:
+    global _sleep
+    _sleep = fn
+
+
+def _is_retryable_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    return is_retryable(error) or status_code == 429 or status_code in range(500, 600)
+
+
+def _calculate_backoff(attempt: int) -> float:
+    delay = RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+    delay *= random.uniform(0.5, 1.5)
+    return min(delay, MAX_DELAY_SECONDS)
 
 
 class StructuredOutputError(Exception):
@@ -44,11 +71,16 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
     start_time = time.perf_counter()
     attempts = 0
 
+    candidates = get_candidate_models(request.model)
+    # 路由决策：不改变路由行为，仅记录决策信息供内部结果与 Trace 使用
+    route_decision: RouteDecision = get_route_decision(request.model)
+
     def save_trace(
         status: Literal["success", "failed"],
         actual_model: str | None,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
+        usage: Usage | None = None,
+        ttft_ms: float | None = None,
+        cost_usd: float | None = None,
         error_code: str | None = None,
     ) -> None:
         record_trace(
@@ -57,16 +89,22 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
                 timestamp=timestamp,
                 requested_model=request.model,
                 actual_model=actual_model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=usage.input_tokens if usage else 0,
+                output_tokens=usage.output_tokens if usage else 0,
+                cached_tokens=usage.cached_tokens if usage else None,
+                reasoning_tokens=usage.reasoning_tokens if usage else None,
+                total_tokens=usage.total_tokens if usage else None,
                 latency_ms=round((time.perf_counter() - start_time) * 1000),
+                ttft_ms=ttft_ms,
+                cost_usd=cost_usd,
+                # route 以 JSON 可序列化形式写入 Trace
+                route=route_decision.model_dump(mode="json"),
                 attempts=attempts,
                 status=status,
                 error_code=error_code,
             )
         )
 
-    candidates = get_candidate_models(request.model)
     if not candidates:
         save_trace("failed", None, error_code=UNKNOWN_MODEL)
         raise GatewayError(UNKNOWN_MODEL, "Unknown model", status_code=400)
@@ -126,7 +164,7 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
 
         if not isinstance(parsed, dict):
             raise StructuredOutputError(
-				SCHEMA_VALIDATION_FAILED,
+                SCHEMA_VALIDATION_FAILED,
                 "Structured output must be a JSON object",
             )
         result.response.parsed = parsed
@@ -134,10 +172,12 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
 
     for index, (model_name, model_config) in enumerate(candidates):
         breaker = get_breaker(model_name)
+        candidate_tried = False
         for attempt in range(MAX_RETRIES + 1):
             if not breaker.is_available():
                 break
 
+            candidate_tried = True
             all_candidates_skipped = False
             attempts += 1
             try:
@@ -145,11 +185,29 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
                     await call_upstream(upstream_request, model_config)
                 )
                 breaker.record_success()
+
+                # 选中该候选模型
+                route_decision.selected = model_name
+                usage = result.response.usage
+
+                # 按单价计算成本：input_tokens * input_price + output_tokens * output_price
+                # 单价单位：美元 / token
+                cost_usd: float | None = None
+                if usage is not None:
+                    cost_usd = (
+                        usage.input_tokens * model_config.input_price
+                        + usage.output_tokens * model_config.output_price
+                    )
+
+                result.response.route = route_decision
+                result.response.cost_usd = cost_usd
+
                 save_trace(
                     "success",
                     result.response.model,
-                    result.input_tokens,
-                    result.output_tokens,
+                    usage=usage,
+                    ttft_ms=result.response.ttft_ms,
+                    cost_usd=cost_usd,
                 )
                 return result.response
             except Exception as exc:
@@ -158,17 +216,25 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
                 if isinstance(exc, StructuredOutputError):
                     save_trace("failed", None, error_code=exc.code)
                     raise GatewayError(exc.code, str(exc)) from exc
-                if is_retryable(exc) and attempt < MAX_RETRIES:
+                if _is_retryable_error(exc) and attempt < MAX_RETRIES:
+                    retry_attempt = attempt + 1
+                    delay = _calculate_backoff(retry_attempt)
                     logger.warning(
-                        "模型 %s 第 %d 次调用失败，将在 %.1f 秒后重试: %s",
+                        "模型 %s 第 %d 次调用失败，将在 %.3f 秒后重试: %s",
                         model_name,
-                        attempt + 1,
-                        RETRY_DELAY_SECONDS,
+                        retry_attempt,
+                        delay,
                         exc,
                     )
-                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    await _sleep(delay)
                     continue
                 break
+
+        # 该候选模型已耗尽重试，记入 rejected（含拒绝原因）
+        if candidate_tried and last_error is not None:
+            route_decision.rejected.append(
+                RejectedCandidate(model=model_name, reason=str(last_error))
+            )
 
         if index < len(candidates) - 1:
             next_model_name = candidates[index + 1][0]
