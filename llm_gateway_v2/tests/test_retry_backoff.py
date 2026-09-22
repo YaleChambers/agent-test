@@ -1,11 +1,9 @@
 import random
-from types import SimpleNamespace
 
 import pytest
 
 from app.schemas import LLMRequest
 from app.services import gateway
-from app.services.upstream import UpstreamResult
 
 
 class AlwaysAvailableBreaker:
@@ -17,6 +15,16 @@ class AlwaysAvailableBreaker:
 
     def record_failure(self) -> None:
         pass
+
+
+class FakeAdapter:
+    """包装任意 async call 函数，模拟 get_adapter 返回的适配器。"""
+
+    def __init__(self, call_fn) -> None:
+        self._call_fn = call_fn
+
+    async def chat(self, request, model_config):
+        return await self._call_fn(request, model_config)
 
 
 class StatusError(Exception):
@@ -41,7 +49,7 @@ def retry_context(monkeypatch):
     monkeypatch.setattr(gateway, "get_breaker", lambda key: AlwaysAvailableBreaker())
     monkeypatch.setattr(gateway, "MAX_RETRIES", 1)
     monkeypatch.setattr(gateway, "RETRY_DELAY_SECONDS", 0.1)
-    monkeypatch.setattr(gateway, "call_upstream", fake_call_upstream)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fake_call_upstream))
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     yield sleeps, calls
     gateway.set_sleep_fn(gateway.asyncio.sleep)
@@ -106,7 +114,7 @@ async def test_non_retryable_error_does_not_sleep(retry_context, monkeypatch):
         calls.append(model_config.model)
         raise ValueError("invalid parameter")
 
-    monkeypatch.setattr(gateway, "call_upstream", fail_once)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fail_once))
 
     with pytest.raises(Exception):
         await gateway.call_llm(make_request())
@@ -125,7 +133,7 @@ async def test_retryable_errors_trigger_retry(retry_context, monkeypatch, error)
         calls.append(model_config.model)
         raise error
 
-    monkeypatch.setattr(gateway, "call_upstream", fail_twice)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fail_twice))
 
     with pytest.raises(Exception):
         await gateway.call_llm(make_request())

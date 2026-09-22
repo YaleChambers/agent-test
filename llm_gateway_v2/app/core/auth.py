@@ -2,7 +2,7 @@ import os
 
 from fastapi import Depends, Header
 
-from app.core.errors import GatewayError
+from app.core.errors import UNAUTHORIZED, GatewayError
 
 
 async def verify_token(
@@ -10,11 +10,11 @@ async def verify_token(
 ) -> None:
     expected_token = os.getenv("GATEWAY_API_KEY", "test-key")
     if not authorization or not authorization.startswith("Bearer "):
-        raise GatewayError("unauthorized", "Unauthorized", status_code=401)
+        raise GatewayError(UNAUTHORIZED, "Unauthorized", status_code=401)
 
     token = authorization.removeprefix("Bearer ")
     if token != expected_token:
-        raise GatewayError("unauthorized", "Unauthorized", status_code=401)
+        raise GatewayError(UNAUTHORIZED, "Unauthorized", status_code=401)
 
 
 verify_token_dependency = Depends(verify_token)

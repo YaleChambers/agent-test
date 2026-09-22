@@ -7,8 +7,8 @@ from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
 from ..core.auth import verify_token
-from ..core.errors import GatewayError
-from ..core.rate_limit import rate_limit
+from ..core.errors import RATE_LIMITED, GatewayError
+from ..core.rate_limit import rate_limiter
 from ..schemas import CallTrace, LLMRequest, LLMResponse, Message
 from ..schemas_openai import (
     ChatCompletion,
@@ -74,8 +74,9 @@ async def health() -> dict[str, str]:
 async def llm_endpoint(
     request: LLMRequest,
     _: None = Depends(verify_token),
-    _rl: None = Depends(rate_limit),
 ) -> LLMResponse:
+    if not await rate_limiter.check(request.model):
+        raise GatewayError(RATE_LIMITED, "Rate limit exceeded", status_code=429)
     return await call_llm(request)
 
 
@@ -84,9 +85,10 @@ async def stream_endpoint(
     request: LLMRequest,
     http_request: Request,
     _: None = Depends(verify_token),
-    _rl: None = Depends(rate_limit),
 ) -> StreamingResponse:
-	return await stream_llm(request, http_request)
+    if not await rate_limiter.check(request.model):
+        raise GatewayError(RATE_LIMITED, "Rate limit exceeded", status_code=429)
+    return await stream_llm(request, http_request)
 
 
 @router.post("/v1/chat/completions", response_model=None)
@@ -101,6 +103,8 @@ async def openai_chat_completions(
         )
 
     try:
+        if not await rate_limiter.check(request.model):
+            raise GatewayError(RATE_LIMITED, "Rate limit exceeded", status_code=429)
         result = await call_llm(_to_internal_request(request))
         # 内部 Usage 使用 input_tokens/output_tokens/total_tokens 字段
         usage = getattr(result, "usage", None)

@@ -1,17 +1,12 @@
 import os
 import json
 import time
-from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
+from ..adapters.types import UpstreamResult
 from ..config import ModelConfig
 from ..schemas import LLMRequest, LLMResponse, Usage
-
-
-@dataclass(frozen=True)
-class UpstreamResult:
-    response: LLMResponse
 
 
 async def call_upstream(

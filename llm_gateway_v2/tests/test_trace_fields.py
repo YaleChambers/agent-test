@@ -2,7 +2,7 @@ import pytest
 
 from app.schemas import LLMRequest, LLMResponse, Usage
 from app.services import gateway
-from app.services.upstream import UpstreamResult
+from app.services.adapters.types import UpstreamResult
 from app.services.usage import get_traces
 
 
@@ -15,6 +15,14 @@ class AlwaysAvailableBreaker:
 
     def record_failure(self) -> None:
         pass
+
+
+class FakeAdapter:
+    def __init__(self, call_fn) -> None:
+        self._call_fn = call_fn
+
+    async def chat(self, request, model_config):
+        return await self._call_fn(request, model_config)
 
 
 @pytest.fixture
@@ -58,7 +66,7 @@ async def test_non_streaming_trace_has_positive_ttft(
             raise ValueError("first candidate down")
         return success
 
-    monkeypatch.setattr(gateway, "call_upstream", fake_call_upstream)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fake_call_upstream))
 
     await gateway.call_llm(make_request("general"))
 
@@ -89,7 +97,7 @@ async def test_non_streaming_trace_usage_tokens_not_zero(
             raise ValueError("first candidate down")
         return success
 
-    monkeypatch.setattr(gateway, "call_upstream", fake_call_upstream)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fake_call_upstream))
 
     await gateway.call_llm(make_request("general"))
 
@@ -131,7 +139,7 @@ async def test_non_streaming_trace_cost_usd_calculated(
             raise ValueError("first candidate down")
         return success
 
-    monkeypatch.setattr(gateway, "call_upstream", fake_call_upstream)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fake_call_upstream))
 
     result = await gateway.call_llm(make_request("general"))
 
@@ -160,7 +168,7 @@ async def test_non_streaming_trace_route_has_selected_and_rejected(
             raise ValueError("first candidate down")
         return success
 
-    monkeypatch.setattr(gateway, "call_upstream", fake_call_upstream)
+    monkeypatch.setattr(gateway, "get_adapter", lambda _mc: FakeAdapter(fake_call_upstream))
 
     result = await gateway.call_llm(make_request("general"))
 

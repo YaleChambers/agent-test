@@ -20,7 +20,7 @@ from ..core.errors import (
     SCHEMA_VALIDATION_FAILED,
     UNKNOWN_MODEL,
     UNKNOWN_PROMPT_TEMPLATE,
-    UPSTREAM_ERROR,
+    map_upstream_error,
 )
 from ..config import MAX_RETRIES, RETRY_DELAY_SECONDS
 from ..schemas import (
@@ -34,7 +34,8 @@ from ..schemas import (
 )
 from .router import get_candidate_models, get_route_decision, is_retryable
 from .prompts import render_prompt
-from .upstream import UpstreamResult, call_upstream
+from .adapters.registry import get_adapter
+from .adapters.types import UpstreamResult
 from .usage import record_trace
 
 
@@ -182,7 +183,7 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
             attempts += 1
             try:
                 result = validate_structured_output(
-                    await call_upstream(upstream_request, model_config)
+                    await get_adapter(model_config).chat(upstream_request, model_config)
                 )
                 breaker.record_success()
 
@@ -252,10 +253,7 @@ async def call_llm(request: LLMRequest) -> LLMResponse:
             "All candidates are circuit-broken",
         )
 
-    if request.model == "general-backup":
-        save_trace("failed", None, error_code=UPSTREAM_ERROR)
-        error_code = UPSTREAM_ERROR
-    else:
-        save_trace("failed", None, error_code=MODEL_UNAVAILABLE)
-        error_code = MODEL_UNAVAILABLE
-    raise GatewayError(error_code, str(last_error)) from last_error
+    # 按异常类型映射错误码与 HTTP 状态
+    error_code, http_status = map_upstream_error(last_error)
+    save_trace("failed", None, error_code=error_code)
+    raise GatewayError(error_code, str(last_error), status_code=http_status) from last_error

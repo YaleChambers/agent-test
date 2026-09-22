@@ -20,6 +20,8 @@ class ModelConfig:
     # 例如 0.00000014 表示 $0.14 / 1M tokens。
     input_price: float = 0.0
     output_price: float = 0.0
+    # 上游协议：openai_compatible（默认）或 openai_responses。
+    protocol: str = "openai_compatible"
 
 
 CandidateModel: TypeAlias = tuple[str, ModelConfig]
@@ -32,8 +34,6 @@ RETRYABLE_ERRORS = (
     TimeoutError,
     ConnectionError,
 )
-MAX_RETRIES = 1
-RETRY_DELAY_SECONDS = 0.1
 
 
 def _replace_env_vars(value):
@@ -57,6 +57,11 @@ if not config_path.exists():
 with config_path.open(encoding="utf-8") as config_file:
     config = _replace_env_vars(yaml.safe_load(config_file) or {})
 
+# 从 YAML 的 retry 段读取重试配置；无 retry 段时用默认值
+retry_config = config.get("retry", {})
+MAX_RETRIES = int(retry_config.get("max_retries", 3))
+RETRY_DELAY_SECONDS = float(retry_config.get("base_delay_seconds", 0.1))
+
 providers = config.get("providers", {})
 models = config.get("models", {})
 MODEL_CONFIGS: dict[str, ModelConfig] = {}
@@ -71,6 +76,7 @@ for name, model_config in models.items():
                 base_url=providers[candidate["provider"]]["base_url"],
                 input_price=float(candidate.get("input_price", 0.0)),
                 output_price=float(candidate.get("output_price", 0.0)),
+                protocol=str(candidate.get("protocol", "openai_compatible")),
             )
             candidate_name = f"{name}__candidate_{index}"
             candidates.append((candidate_name, candidate_config))
@@ -83,6 +89,7 @@ for name, model_config in models.items():
         base_url=providers[model_config["provider"]]["base_url"],
         input_price=float(model_config.get("input_price", 0.0)),
         output_price=float(model_config.get("output_price", 0.0)),
+        protocol=str(model_config.get("protocol", "openai_compatible")),
     )
 
 
